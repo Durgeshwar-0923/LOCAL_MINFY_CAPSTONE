@@ -1,295 +1,215 @@
 import os
-import uuid
 import pandas as pd
-import flask
-import boto3
-import json
-import tarfile
-import traceback
-import mlflow
-import re
 import numpy as np
-import joblib 
+import mlflow
+import joblib
+import logging
+import json
 
-from werkzeug.utils import secure_filename
-from src.utils.logger import setup_logger
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import FunctionTransformer
 
-# --- This is the key fix: Import all the individual preprocessor components ---
+# Custom modules
 from src.data_processing.preprocessor.cleaning import clean_data
 from src.data_processing.preprocessor.type_conversion import convert_column_types
 from src.data_processing.preprocessor.missing_imputation import MissingValueImputer
 from src.data_processing.preprocessor.outlier_handler import OutlierTransformer
-from src.data_processing.preprocessor.feature_engineering import FeatureEngineeringTransformer
+from src.data_processing.preprocessor.feature_engineering import (
+    FeatureEngineeringTransformer,
+    compute_and_save_shap_importance,
+    compute_permutation_importance
+)
 from src.data_processing.preprocessor.binning import BinningTransformer
 from src.data_processing.preprocessor.rare_label_encoder import RareLabelEncoder
 from src.data_processing.preprocessor.encoding import OneHotEncodingTransformer
-from src.data_processing.preprocessor.vif_filter import RFECVTransformer as VIFTransformer
-from src.data_processing.preprocessor.target_encoder_wrapper import TargetEncoderWrapper
-from sklearn.preprocessing import StandardScaler
+from src.data_processing.preprocessor.clustering import EngagementClusteringTransformer
+from src.data_processing.preprocessor.scaling import apply_feature_scaling
+from src.data_processing.preprocessor.vif_filter import RFECVTransformer
+from src.data_processing.preprocessor.feature_selection import SHAPFeatureSelector
 
-# --- Initial Setup ---
-logger = setup_logger(__name__)
-app = flask.Flask(__name__, template_folder='templates')
-app.config['SECRET_KEY'] = os.urandom(24)
+try:
+    from src.utils.logger import setup_logger
+    logger = setup_logger(__name__)
+except ImportError:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
 
-# --- Configuration ---
-S3_BUCKET_NAME = "flaskcapstonebucket"
-MODEL_S3_KEY = "models/LeadConversionModel/model.tar.gz"
-MODEL_PATH = "/tmp/model" 
+mlflow.set_experiment("Lead_Conversion_Preprocessing_Boosted")
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, "uploads")
-PRED_FOLDER = os.path.join(PROJECT_ROOT, "predictions")
-REFERENCE_DATA_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "Lead Scoring.csv")
+OUTPUT_DIRS = [
+    "outputs/plots", "outputs/distributions", "outputs/importance",
+    "outputs/stages", "artifacts", "data/processed", "reports", "artifacts/pipeline"
+]
+for d in OUTPUT_DIRS:
+    os.makedirs(d, exist_ok=True)
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PRED_FOLDER, exist_ok=True)
+SHAP_CSV_PATH = "artifacts/feature_engineering/shap_feature_importance.csv"
+SHAP_PLOT_PATH = "artifacts/feature_engineering/shap_feature_importance.png"
 
-# --- Schema Standardization (No longer includes 'Converted') ---
-EXPECTED_RAW_SCHEMA = {
-    'Prospect ID': 'prospect_id', 'Lead Number': 'lead_number', 'Lead Origin': 'lead_origin',
-    'Lead Source': 'lead_source', 'Do Not Email': 'do_not_email', 'Do Not Call': 'do_not_call',
-    'TotalVisits': 'totalvisits', 'Total Time Spent on Website': 'total_time_spent_on_website',
-    'Page Views Per Visit': 'page_views_per_visit', 'Last Activity': 'last_activity',
-    'Country': 'country', 'Specialization': 'specialization',
-    'How did you hear about X Education': 'how_did_you_hear_about_x_education',
-    'What is your current occupation': 'what_is_your_current_occupation',
-    'What matters most to you in choosing a course': 'what_matters_most_to_you_in_choosing_a_course',
-    'Search': 'search', 'Magazine': 'magazine', 'Newspaper Article': 'newspaper_article',
-    'X Education Forums': 'x_education_forums', 'Newspaper': 'newspaper',
-    'Digital Advertisement': 'digital_advertisement', 'Through Recommendations': 'through_recommendations',
-    'Receive More Updates About Our Courses': 'receive_more_updates_about_our_courses',
-    'Tags': 'tags', 'Lead Quality': 'lead_quality',
-    'Update me on Supply Chain Content': 'update_me_on_supply_chain_content',
-    'Get updates on DM Content': 'get_updates_on_dm_content', 'Lead Profile': 'lead_profile',
-    'City': 'city', 'Asymmetrique Activity Index': 'asymmetrique_activity_index',
-    'Asymmetrique Profile Index': 'asymmetrique_profile_index',
-    'Asymmetrique Activity Score': 'asymmetrique_activity_score',
-    'Asymmetrique Profile Score': 'asymmetrique_profile_score',
-    'I agree to pay the amount through cheque': 'i_agree_to_pay_the_amount_through_cheque',
-    'A free copy of Mastering The Interview': 'a_free_copy_of_mastering_the_interview',
-    'Last Notable Activity': 'last_notable_activity'
-}
+PIPELINE_STEPS = [
+    ("1_clean", clean_data),                                 # Handle invalid and noisy text or patterns
+    ("2_type_convert", convert_column_types),                # Convert to correct dtypes for processing
+    ("3_impute", MissingValueImputer()),                     # Handle missing data with statistical imputers
+    ("4_outlier", OutlierTransformer()),                     # Detect and cap or remove outliers
+    ("5_engineer", FeatureEngineeringTransformer()),         # Create new informative features
+    ("6_bin", BinningTransformer()),                          # Bin continuous features into categorical buckets
+    ("7_rare_label", RareLabelEncoder()),                     # Merge rare labels to improve signal
+    ("8_vif", RFECVTransformer()),                            # Remove multicollinear numerical features
+    ("9_encode", OneHotEncodingTransformer()),               # Encode categorical values post-binning
+    ("10_scale", apply_feature_scaling),                      # Normalize feature ranges
+    ("11_compute_shap", None),                                # Placeholder for SHAP computation step (custom handled)
+    ("12_cluster", EngagementClusteringTransformer()),        # Assign cluster labels for segmentation
+    ("13_shap_feature_selection", SHAPFeatureSelector())    # Filter least useful features based on SHAP
+]
 
-def _standardize_input_columns(raw_df: pd.DataFrame) -> pd.DataFrame:
-    def standardize(name): return re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).lower().strip('_')
-    df_renamed = raw_df.copy()
-    df_renamed.columns = [standardize(col) for col in df_renamed.columns]
-    raw_to_snake = {standardize(k): v for k, v in EXPECTED_RAW_SCHEMA.items()}
-    final_df = pd.DataFrame()
-    expected_cols = list(EXPECTED_RAW_SCHEMA.values())
-    for standardized_user_col in df_renamed.columns:
-        if standardized_user_col in raw_to_snake:
-            final_snake_name = raw_to_snake[standardized_user_col]
-            final_df[final_snake_name] = df_renamed[standardized_user_col]
-    for col in expected_cols:
-        if col not in final_df.columns:
-            final_df[col] = np.nan
-    return final_df[expected_cols]
+def log_stage(df_before, df_after, step_name):
+    rows_before, cols_before = df_before.shape
+    rows_after, cols_after = df_after.shape
+    logger.info(f"Step '{step_name}': rows {rows_before}->{rows_after}, cols {cols_before}->{cols_after}")
+    print(f"[{step_name}] Rows: {rows_before}->{rows_after} | Cols: {cols_before}->{cols_after}")
+    if cols_before != cols_after:
+        logger.info(f"📉 {cols_before - cols_after} features removed at step '{step_name}'")
 
-# --- Preprocessing Pipeline Class ---
-class PreprocessingPipeline:
-    def __init__(self, artifact_path='/tmp/model/artifacts'):
-        self.artifact_path = artifact_path
-        self.artifacts = self._load_all_artifacts()
+def run_preprocessing_pipeline(df: pd.DataFrame, target_col: str = 'Converted', is_training: bool = True):
+    run_id = f"preproc_{'train' if is_training else 'infer'}"
+    target_series = df[target_col].copy() if (target_col in df.columns and is_training) else None
 
-    def _load_all_artifacts(self):
-        logger.info(f"Loading all preprocessing artifacts from: {self.artifact_path}")
-        artifacts = {}
-        # Single file artifacts
-        single_file_map = {
-            "imputer": "imputation/imputer_values.joblib", "outlier_config": "outliers/outlier_config.joblib",
-            "vif_selected_features": "vif/vif_selected_features.joblib", "encoder": "encoding/full_encoding_transformer.joblib",
-            "initial_scaler": "scaling/feature_scaler.joblib", "final_target_encoder": "final_target_encoder.joblib",
-            "final_scaler": "feature_scaler.pkl"
-        }
-        for name, rel_path in single_file_map.items():
-            full_path = os.path.join(self.artifact_path, rel_path)
+    with mlflow.start_run(run_name=run_id):
+        logger.info(f"🚀 Starting preprocessing MLflow run: {run_id}")
+        mlflow.log_param("initial_rows", len(df))
+        mlflow.log_param("initial_cols", df.shape[1])
+
+        for step_name, transformer in PIPELINE_STEPS:
+            df_before = df.copy()
+            logger.info(f"🔧 Applying {step_name}...")
+
             try:
-                artifacts[name] = joblib.load(full_path)
-                logger.info(f"✅ Successfully loaded artifact: {name}")
+                if step_name == "10_scale":
+                    # Scaling function takes df and params
+                    df = transformer(df, target_col=target_col, is_training=is_training)
+
+                elif step_name == "8_vif":
+                    numeric_df = df.select_dtypes(include=[np.number])
+                    valid_features = numeric_df.loc[:, numeric_df.nunique() > 2]
+                    if valid_features.shape[1] > 0:
+                        df_vif_filtered = transformer.fit_transform(valid_features)
+                        df_non_numeric = df.drop(columns=valid_features.columns, errors='ignore')
+                        df = pd.concat([df_vif_filtered, df_non_numeric], axis=1)
+                        df = df.loc[:, ~df.columns.duplicated()]
+                    else:
+                        logger.warning("⚠️ No valid numeric features for VIF. Skipping.")
+
+                elif step_name == "11_compute_shap":
+                    # Reattach target column if available before SHAP
+                    if target_series is not None:
+                        if target_col not in df.columns:
+                            df[target_col] = target_series.reindex(df.index).values
+                        logger.info(f"ℹ️ Re-attached target column '{target_col}' before SHAP step.")
+
+                        # --- FIX: Convert one-hot encoded columns to numeric before SHAP ---
+                        onehot_cols = [col for col in df.columns if col.startswith("onehot__")]
+                        if onehot_cols:
+                            logger.info(f"🔧 Converting one-hot encoded columns to numeric dtype: "
+                                        f"{onehot_cols[:5]}{'...' if len(onehot_cols) > 5 else ''}")
+                            df[onehot_cols] = df[onehot_cols].apply(pd.to_numeric, errors='coerce')
+
+                        # Debug logs to verify alignment
+                        logger.info(f"Before SHAP step, df shape: {df.shape}, target_col present: {target_col in df.columns}")
+                        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+                        logger.info(f"DEBUG: Numeric columns before SHAP: {numeric_cols}")
+                        logger.info(f"All columns dtypes:\n{df.dtypes.value_counts()}")
+                        logger.info(f"Columns and dtypes:\n{df.dtypes}")
+
+                        if target_col in df.columns:
+                            logger.info(f"Target value count: {len(df[target_col])}, df row count: {df.shape[0]}")
+
+                        try:
+                            compute_and_save_shap_importance(df, target_col=target_col)
+                            compute_permutation_importance(df, target_col=target_col)
+                            # Log SHAP artifacts to MLflow
+                            for artifact_path in [SHAP_CSV_PATH, SHAP_PLOT_PATH]:
+                                if os.path.exists(artifact_path):
+                                    mlflow.log_artifact(artifact_path, artifact_path="feature_engineering")
+                                    logger.info(f"✅ Logged artifact to MLflow: {artifact_path}")
+                            # Drop target after SHAP to avoid leakage downstream
+                            df = df.drop(columns=[target_col])
+                        except Exception as e:
+                            logger.warning(f"⚠️ SHAP/Permutation importance step failed: {e}")
+                    else:
+                        logger.warning(f"⚠️ Target column '{target_col}' not found or None; skipping SHAP step.")
+
+                elif step_name == "13_shap_feature_selection":
+                    # Use SHAP CSV artifact if exists, else skip selection gracefully
+                    if os.path.exists(SHAP_CSV_PATH):
+                        df = transformer.fit_transform(df)
+                        logger.info("✅ SHAP feature selection applied successfully.")
+                    else:
+                        logger.warning(f"⚠️ SHAP feature importance CSV not found at {SHAP_CSV_PATH}. Skipping SHAP feature selection.")
+
+                else:
+                    # Default: fit_transform if training else transform
+                    if hasattr(transformer, 'fit_transform') and is_training:
+                        df = transformer.fit_transform(df)
+                    elif hasattr(transformer, 'transform'):
+                        df = transformer.transform(df)
+                    else:
+                        df = transformer(df)
+
             except Exception as e:
-                logger.warning(f"⚠️ Could not load artifact: {name} from path: {full_path}. Setting to None.")
-                artifacts[name] = None
-        
-        # --- FIX 1: Correctly load directory-based artifacts ---
-        artifacts["binning_edges"] = {}
-        binning_path = os.path.join(self.artifact_path, "binning")
-        if os.path.exists(binning_path):
-            for file in os.listdir(binning_path):
-                name = file.replace("_binning_config.joblib", "")
-                # Load the dictionary and extract only the 'edges' key
-                config = joblib.load(os.path.join(binning_path, file))
-                artifacts["binning_edges"][name] = config['edges']
-        
-        artifacts["rare_labels"] = {}
-        rare_label_path = os.path.join(self.artifact_path, "rare_labels")
-        if os.path.exists(rare_label_path):
-            for file in os.listdir(rare_label_path):
-                name = file.replace("_rare_labels.joblib", "")
-                artifacts["rare_labels"][name] = joblib.load(os.path.join(rare_label_path, file))
-        # --- END OF FIX 1 ---
+                logger.warning(f"⚠️ Step '{step_name}' failed: {e}")
 
-        return artifacts
+            log_stage(df_before, df, step_name)
 
-    def transform(self, raw_df: pd.DataFrame) -> pd.DataFrame:
-        df = _standardize_input_columns(raw_df)
-        df = clean_data(df, verbose=False)
-        df = convert_column_types(df)
-        
-        imputer = MissingValueImputer(); imputer.imputer_values_ = self.artifacts.get("imputer", {})
-        df = imputer.transform(df)
-        
-        outlier_transformer = OutlierTransformer(); outlier_transformer.clip_bounds_ = self.artifacts.get("outlier_config", {})
-        df = outlier_transformer.transform(df)
-        
-        fe_transformer = FeatureEngineeringTransformer(); fe_transformer.fit(df); df = fe_transformer.transform(df)
-        
-        binning_transformer = BinningTransformer(); 
-        binning_transformer.bin_edges = self.artifacts.get("binning_edges", {})
-        df = binning_transformer.transform(df)
-        
-        rare_label_encoder = RareLabelEncoder(); 
-        rare_label_encoder.rare_labels_ = self.artifacts.get("rare_labels", {})
-        df = rare_label_encoder.transform(df)
-        
-        # --- FIX 2: Correct VIF filtering logic ---
-        vif_features_to_keep = self.artifacts.get("vif_selected_features")
-        if vif_features_to_keep:
-            numeric_df = df.select_dtypes(include=np.number)
-            vif_candidates = numeric_df.columns[numeric_df.nunique() > 2]
-            cols_to_drop = [col for col in vif_candidates if col not in vif_features_to_keep]
-            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-        # --- END OF FIX 2 ---
+            removed_cols = set(df_before.columns) - set(df.columns)
+            if removed_cols:
+                removed_path = f"outputs/stages/{step_name}_removed_columns.json"
+                with open(removed_path, "w") as f:
+                    json.dump(list(removed_cols), f)
+                mlflow.log_artifact(removed_path, artifact_path=f"stages/{step_name}")
 
-        encoder = self.artifacts.get("encoder")
-        if encoder:
-            df['converted'] = 0 
-            encoded_data = encoder.transform(df)
-            feature_names = encoder.get_feature_names_out()
-            df = pd.DataFrame(encoded_data, columns=feature_names, index=df.index)
-            cols_to_drop = [col for col in df.columns if 'converted' in col]
-            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+            stage_path = f"outputs/stages/{step_name}.csv"
+            df.to_csv(stage_path, index=False)
+            mlflow.log_artifact(stage_path, artifact_path=f"stages/{step_name}")
+# --- ✅ Reattach target column before saving final processed data ---
+        if target_series is not None:
+            df[target_col] = target_series.reindex(df.index).values
 
-        initial_scaler_artifact = self.artifacts.get("initial_scaler")
-        if initial_scaler_artifact:
-            scaler_transformer = initial_scaler_artifact['transformer']
-            scaler_cols = initial_scaler_artifact['columns']
-            for col in scaler_cols:
-                if col not in df.columns: df[col] = 0
-            df_to_scale = df[scaler_cols]
-            scaled_data = scaler_transformer.transform(df_to_scale)
-            df_scaled = pd.DataFrame(scaled_data, columns=scaler_cols, index=df.index)
-            df_unscaled = df.drop(columns=scaler_cols, errors='ignore')
-            df = pd.concat([df_unscaled, df_scaled], axis=1)
-        
-        final_target_encoder = self.artifacts.get("final_target_encoder")
-        if final_target_encoder:
-            df = final_target_encoder.transform(df)
+        final_path = "data/processed/13_final_features.csv"
+        df.to_csv(final_path, index=False)
+        mlflow.log_artifact(final_path, artifact_path='processed')
 
-        final_scaler = self.artifacts.get("final_scaler")
-        if final_scaler:
-            df_final = pd.DataFrame(final_scaler.transform(df), columns=df.columns, index=df.index)
-        else:
-            df_final = df
-        logger.info(f"✅ Preprocessing fully complete.")
-        return df_final
+        pipeline_path = 'artifacts/pipeline/preprocessing_pipeline.joblib'
+        joblib.dump(PIPELINE_STEPS, pipeline_path)
+        mlflow.log_artifact(pipeline_path, artifact_path='pipeline')
 
-# --- Load Model and Preprocessor at Startup ---
-def download_and_load_model():
-    # ... (This logic is correct)
-    try:
-        os.makedirs(MODEL_PATH, exist_ok=True)
-        local_tar_path = os.path.join(MODEL_PATH, "model.tar.gz")
-        logger.info(f"Downloading model from s3://{S3_BUCKET_NAME}/{MODEL_S3_KEY}...")
-        s3_client = boto3.client("s3")
-        s3_client.download_file(S3_BUCKET_NAME, MODEL_S3_KEY, local_tar_path)
-        logger.info("✅ Model downloaded successfully.")
-        logger.info(f"Unpacking {local_tar_path}...")
-        with tarfile.open(local_tar_path, "r:gz") as tar:
-            tar.extractall(path=MODEL_PATH)
-        logger.info("✅ Model unpacked successfully.")
-        model_artifact_name = "StackingEnsemble"
-        mlflow_model_path = os.path.join(MODEL_PATH, model_artifact_name)
-        logger.info(f"Loading MLflow model from: {mlflow_model_path}")
-        model = mlflow.pyfunc.load_model(mlflow_model_path)
-        logger.info("✅ MLflow model loaded.")
-        artifact_path = os.path.join(MODEL_PATH, "artifacts")
-        logger.info(f"Loading preprocessor from: {artifact_path}")
-        preprocessor = PreprocessingPipeline(artifact_path=artifact_path)
-        logger.info("✅ Preprocessor loaded.")
-        return model, preprocessor
-    except Exception as e:
-        logger.error("❌ FAILED TO LOAD MODEL AND PREPROCESSOR ON STARTUP.")
-        traceback.print_exc()
-        return None, None
+        mlflow.log_metric("final_rows", df.shape[0])
+        mlflow.log_metric("final_cols", df.shape[1])
 
-model, preprocessor = download_and_load_model()
+        final_shape_str = f"{df.shape[0]} rows × {df.shape[1]} columns"
+        logger.info(f"✅ Preprocessing complete. Final dataset shape: {final_shape_str}")
+        print(f"\n✅ Preprocessing completed successfully!")
+        print(f"🗖 Final dataset size: {final_shape_str}\n")
 
-# --- Flask App Routes ---
-# The rest of the file does not need to change.
-@app.route("/")
-def home():
-    return flask.render_template("index.html", model_name="LeadConversionModel", model_loaded=(model is not None))
+    return df
 
-@app.route("/upload", methods=["POST"])
-def upload():
-    if not model or not preprocessor:
-        flask.flash("Model is not loaded. Cannot process requests. Check server logs.", "danger")
-        return flask.redirect(flask.url_for('home'))
-    if 'file' not in flask.request.files:
-        flask.flash("No file part in the request.", "warning")
-        return flask.redirect(flask.url_for('home'))
-    file = flask.request.files['file']
-    if file.filename == '':
-        flask.flash("No file selected for uploading.", "warning")
-        return flask.redirect(flask.url_for('home'))
-    if file and file.filename.endswith('.csv'):
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(file_path)
-        try:
-            raw_df = pd.read_csv(file_path)
-            processed_df = preprocessor.transform(raw_df)
-            if hasattr(model, 'metadata') and model.metadata.signature:
-                model_features = model.metadata.get_input_schema().input_names()
-                processed_df = processed_df.reindex(columns=model_features, fill_value=0)
-            predictions = model.predict(processed_df)
-            probabilities = predictions.iloc[:, 0].tolist() if isinstance(predictions, pd.DataFrame) else predictions.tolist()
-            results_df = raw_df.copy()
-            results_df['Lead_Conversion_Probability'] = [f"{p:.2%}" for p in probabilities]
-            results_df['Lead_Converted_Prediction'] = (pd.Series(probabilities) > 0.5).astype(int)
-            result_id = uuid.uuid4().hex[:8]
-            result_file = f"prediction_{result_id}_{filename}"
-            result_path = os.path.join(PRED_FOLDER, result_file)
-            results_df.to_csv(result_path, index=False)
-            table_headers = results_df.columns.tolist()
-            table_rows = results_df.head(100).values.tolist()
-            return flask.render_template(
-                "result.html", table_headers=table_headers, table_rows=table_rows,
-                result_file=result_file, model_name="LeadConversionModel", num_records=len(results_df)
-            )
-        except Exception as e:
-            logger.error(f"An error occurred during prediction: {e}", exc_info=True)
-            flask.flash(f"An error occurred during processing: {e}", "danger")
-            return flask.redirect(flask.url_for('home'))
-    else:
-        flask.flash("Invalid file type. Please upload a CSV file.", "danger")
-        return flask.redirect(flask.url_for('home'))
 
-@app.route("/sample")
-def sample():
-    return flask.send_file(REFERENCE_DATA_PATH, as_attachment=True)
+def run_pipeline_with_tracking(raw_data_path: str = 'data/raw/Lead Scoring.csv', target_col: str = 'Converted', is_training: bool = True):
+    if not os.path.exists(raw_data_path):
+        logger.error(f"Raw data path not found: {raw_data_path}")
+        return
+    df_raw = pd.read_csv(raw_data_path)
+    run_preprocessing_pipeline(df_raw, target_col=target_col, is_training=is_training)
 
-@app.route("/download/<filename>")
-def download(filename):
-    safe_filename = secure_filename(filename)
-    file_path = os.path.join(PRED_FOLDER, safe_filename)
-    if os.path.exists(file_path):
-        return flask.send_file(file_path, as_attachment=True)
-    else:
-        flask.flash("File not found.", "danger")
-        return flask.redirect(flask.url_for('home'))
 
-if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=8000)
+def main(raw_path='data/raw/Lead Scoring.csv'):
+    if not os.path.exists(raw_path):
+        logger.error(f"Raw data missing: {raw_path}")
+        return
+    df_raw = pd.read_csv(raw_path)
+    df_processed = run_preprocessing_pipeline(df_raw, target_col='Converted', is_training=True)
+    df_processed.to_csv('data/processed/processed_data.csv', index=False)
+    logger.info("Processed data saved.")
+
+
+if __name__ == '__main__':
+    main()
