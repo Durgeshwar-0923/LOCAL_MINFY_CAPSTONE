@@ -31,6 +31,10 @@ from sklearn.preprocessing import StandardScaler
 logger = setup_logger(__name__)
 app = flask.Flask(__name__, template_folder='templates')
 
+# --- FIX 1: Add a Secret Key for Flask Sessions ---
+app.config['SECRET_KEY'] = os.urandom(24)
+# --- END OF FIX 1 ---
+
 # --- Configuration ---
 S3_BUCKET_NAME = "flaskcapstonebucket"
 MODEL_S3_KEY = "models/LeadConversionModel/model.tar.gz"
@@ -44,13 +48,68 @@ REFERENCE_DATA_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "Lead Scoring.cs
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PRED_FOLDER, exist_ok=True)
 
-# --- Preprocessing Pipeline Class ---
+# --- FIX 2: Add Schema Standardization ---
+# This dictionary is the "source of truth" for the expected input columns.
+EXPECTED_RAW_SCHEMA = {
+    'Prospect ID': 'prospect_id', 'Lead Number': 'lead_number', 'Lead Origin': 'lead_origin',
+    'Lead Source': 'lead_source', 'Do Not Email': 'do_not_email', 'Do Not Call': 'do_not_call',
+    'Converted': 'converted', 'TotalVisits': 'totalvisits', # Note the lowercase 'v'
+    'Total Time Spent on Website': 'total_time_spent_on_website',
+    'Page Views Per Visit': 'page_views_per_visit', 'Last Activity': 'last_activity',
+    'Country': 'country', 'Specialization': 'specialization',
+    'How did you hear about X Education': 'how_did_you_hear_about_x_education',
+    'What is your current occupation': 'what_is_your_current_occupation',
+    'What matters most to you in choosing a course': 'what_matters_most_to_you_in_choosing_a_course',
+    'Search': 'search', 'Magazine': 'magazine', 'Newspaper Article': 'newspaper_article',
+    'X Education Forums': 'x_education_forums', 'Newspaper': 'newspaper',
+    'Digital Advertisement': 'digital_advertisement', 'Through Recommendations': 'through_recommendations',
+    'Receive More Updates About Our Courses': 'receive_more_updates_about_our_courses',
+    'Tags': 'tags', 'Lead Quality': 'lead_quality',
+    'Update me on Supply Chain Content': 'update_me_on_supply_chain_content',
+    'Get updates on DM Content': 'get_updates_on_dm_content', 'Lead Profile': 'lead_profile',
+    'City': 'city', 'Asymmetrique Activity Index': 'asymmetrique_activity_index',
+    'Asymmetrique Profile Index': 'asymmetrique_profile_index',
+    'Asymmetrique Activity Score': 'asymmetrique_activity_score',
+    'Asymmetrique Profile Score': 'asymmetrique_profile_score',
+    'I agree to pay the amount through cheque': 'i_agree_to_pay_the_amount_through_cheque',
+    'A free copy of Mastering The Interview': 'a_free_copy_of_mastering_the_interview',
+    'Last Notable Activity': 'last_notable_activity'
+}
+
+def _standardize_input_columns(raw_df: pd.DataFrame) -> pd.DataFrame:
+    def standardize(name): return re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).lower().strip('_')
+    
+    df_renamed = raw_df.copy()
+    df_renamed.columns = [standardize(col) for col in df_renamed.columns]
+    
+    # Create a mapping from any possible standardized name to our official snake_case name
+    raw_to_snake = {standardize(k): v for k, v in EXPECTED_RAW_SCHEMA.items()}
+    
+    final_df = pd.DataFrame()
+    expected_cols = list(EXPECTED_RAW_SCHEMA.values())
+    
+    # Map the user's columns to our expected schema
+    for standardized_user_col in df_renamed.columns:
+        if standardized_user_col in raw_to_snake:
+            final_snake_name = raw_to_snake[standardized_user_col]
+            final_df[final_snake_name] = df_renamed[standardized_user_col]
+            
+    # Ensure all required columns are present, adding them as NaN if missing
+    for col in expected_cols:
+        if col not in final_df.columns:
+            final_df[col] = np.nan
+            
+    # Return the dataframe with the exact columns and order the pipeline expects
+    return final_df[expected_cols]
+# --- END OF FIX 2 ---
+
 class PreprocessingPipeline:
     def __init__(self, artifact_path='/tmp/model/artifacts'):
         self.artifact_path = artifact_path
         self.artifacts = self._load_all_artifacts()
 
     def _load_all_artifacts(self):
+        # ... (This logic is correct)
         logger.info(f"Loading all preprocessing artifacts from: {self.artifact_path}")
         artifacts = {}
         artifact_map = {
@@ -70,7 +129,10 @@ class PreprocessingPipeline:
         return artifacts
 
     def transform(self, raw_df: pd.DataFrame) -> pd.DataFrame:
-        df = raw_df.copy()
+        # --- FIX 2 (continued): Apply standardization first ---
+        df = _standardize_input_columns(raw_df)
+        # --- END OF FIX 2 ---
+        
         df = clean_data(df, verbose=False)
         df = convert_column_types(df)
         imputer = MissingValueImputer(); imputer.imputer_values_ = self.artifacts["imputer"]
@@ -115,6 +177,7 @@ class PreprocessingPipeline:
 
 # --- Load Model and Preprocessor at Startup ---
 def download_and_load_model():
+    # ... (This logic is correct)
     try:
         os.makedirs(MODEL_PATH, exist_ok=True)
         local_tar_path = os.path.join(MODEL_PATH, "model.tar.gz")
@@ -144,13 +207,13 @@ def download_and_load_model():
 model, preprocessor = download_and_load_model()
 
 # --- Flask App Routes ---
+# The rest of the file does not need to change.
 @app.route("/")
 def home():
     return flask.render_template("index.html", model_name="LeadConversionModel", model_loaded=(model is not None))
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    # ... (This logic is correct and does not need to change)
     if not model or not preprocessor:
         flask.flash("Model is not loaded. Cannot process requests. Check server logs.", "danger")
         return flask.redirect(flask.url_for('home'))
@@ -194,15 +257,12 @@ def upload():
         flask.flash("Invalid file type. Please upload a CSV file.", "danger")
         return flask.redirect(flask.url_for('home'))
 
-# --- FIX APPLIED HERE: Added the missing /sample and /download routes back ---
 @app.route("/sample")
 def sample():
-    logger.info("Providing sample data file for download.")
     return flask.send_file(REFERENCE_DATA_PATH, as_attachment=True)
 
 @app.route("/download/<filename>")
 def download(filename):
-    logger.info(f"Processing download request for file: {filename}")
     safe_filename = secure_filename(filename)
     file_path = os.path.join(PRED_FOLDER, safe_filename)
     if os.path.exists(file_path):
@@ -210,7 +270,6 @@ def download(filename):
     else:
         flask.flash("File not found.", "danger")
         return flask.redirect(flask.url_for('home'))
-# --- END OF FIX ---
 
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=8000)
