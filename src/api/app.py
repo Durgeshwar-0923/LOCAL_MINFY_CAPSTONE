@@ -14,7 +14,7 @@ import joblib
 from werkzeug.utils import secure_filename
 from src.utils.logger import setup_logger
 
-# --- Import all the individual preprocessor components ---
+# --- This is the key fix: Import all the individual preprocessor components ---
 from src.data_processing.preprocessor.cleaning import clean_data
 from src.data_processing.preprocessor.type_conversion import convert_column_types
 from src.data_processing.preprocessor.missing_imputation import MissingValueImputer
@@ -30,10 +30,7 @@ from sklearn.preprocessing import StandardScaler
 # --- Initial Setup ---
 logger = setup_logger(__name__)
 app = flask.Flask(__name__, template_folder='templates')
-
-# --- FIX 1: Add a Secret Key for Flask Sessions ---
 app.config['SECRET_KEY'] = os.urandom(24)
-# --- END OF FIX 1 ---
 
 # --- Configuration ---
 S3_BUCKET_NAME = "flaskcapstonebucket"
@@ -48,13 +45,11 @@ REFERENCE_DATA_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "Lead Scoring.cs
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PRED_FOLDER, exist_ok=True)
 
-# --- FIX 2: Add Schema Standardization ---
-# This dictionary is the "source of truth" for the expected input columns.
+# --- Schema Standardization (No longer includes 'Converted') ---
 EXPECTED_RAW_SCHEMA = {
     'Prospect ID': 'prospect_id', 'Lead Number': 'lead_number', 'Lead Origin': 'lead_origin',
     'Lead Source': 'lead_source', 'Do Not Email': 'do_not_email', 'Do Not Call': 'do_not_call',
-    'Converted': 'converted', 'TotalVisits': 'totalvisits', # Note the lowercase 'v'
-    'Total Time Spent on Website': 'total_time_spent_on_website',
+    'TotalVisits': 'totalvisits', 'Total Time Spent on Website': 'total_time_spent_on_website',
     'Page Views Per Visit': 'page_views_per_visit', 'Last Activity': 'last_activity',
     'Country': 'country', 'Specialization': 'specialization',
     'How did you hear about X Education': 'how_did_you_hear_about_x_education',
@@ -78,82 +73,102 @@ EXPECTED_RAW_SCHEMA = {
 
 def _standardize_input_columns(raw_df: pd.DataFrame) -> pd.DataFrame:
     def standardize(name): return re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).lower().strip('_')
-    
     df_renamed = raw_df.copy()
     df_renamed.columns = [standardize(col) for col in df_renamed.columns]
-    
-    # Create a mapping from any possible standardized name to our official snake_case name
     raw_to_snake = {standardize(k): v for k, v in EXPECTED_RAW_SCHEMA.items()}
-    
     final_df = pd.DataFrame()
     expected_cols = list(EXPECTED_RAW_SCHEMA.values())
-    
-    # Map the user's columns to our expected schema
     for standardized_user_col in df_renamed.columns:
         if standardized_user_col in raw_to_snake:
             final_snake_name = raw_to_snake[standardized_user_col]
             final_df[final_snake_name] = df_renamed[standardized_user_col]
-            
-    # Ensure all required columns are present, adding them as NaN if missing
     for col in expected_cols:
         if col not in final_df.columns:
             final_df[col] = np.nan
-            
-    # Return the dataframe with the exact columns and order the pipeline expects
     return final_df[expected_cols]
-# --- END OF FIX 2 ---
 
+# --- Preprocessing Pipeline Class ---
 class PreprocessingPipeline:
     def __init__(self, artifact_path='/tmp/model/artifacts'):
         self.artifact_path = artifact_path
         self.artifacts = self._load_all_artifacts()
 
     def _load_all_artifacts(self):
-        # ... (This logic is correct)
         logger.info(f"Loading all preprocessing artifacts from: {self.artifact_path}")
         artifacts = {}
-        artifact_map = {
+        # Single file artifacts
+        single_file_map = {
             "imputer": "imputation/imputer_values.joblib", "outlier_config": "outliers/outlier_config.joblib",
             "vif_selected_features": "vif/vif_selected_features.joblib", "encoder": "encoding/full_encoding_transformer.joblib",
             "initial_scaler": "scaling/feature_scaler.joblib", "final_target_encoder": "final_target_encoder.joblib",
             "final_scaler": "feature_scaler.pkl"
         }
-        for name, rel_path in artifact_map.items():
+        for name, rel_path in single_file_map.items():
             full_path = os.path.join(self.artifact_path, rel_path)
             try:
                 artifacts[name] = joblib.load(full_path)
                 logger.info(f"✅ Successfully loaded artifact: {name}")
             except Exception as e:
-                logger.error(f"❌ Failed to load artifact: {name} from path: {full_path}. Error: {e}")
+                logger.warning(f"⚠️ Could not load artifact: {name} from path: {full_path}. Setting to None.")
                 artifacts[name] = None
+        
+        # Directory-based artifacts (for binning and rare labels)
+        artifacts["binning_configs"] = {}
+        binning_path = os.path.join(self.artifact_path, "binning")
+        if os.path.exists(binning_path):
+            for file in os.listdir(binning_path):
+                name = file.replace("_binning_config.joblib", "")
+                artifacts["binning_configs"][name] = joblib.load(os.path.join(binning_path, file))
+        
+        artifacts["rare_label_configs"] = {}
+        rare_label_path = os.path.join(self.artifact_path, "rare_labels")
+        if os.path.exists(rare_label_path):
+            for file in os.listdir(rare_label_path):
+                name = file.replace("_rare_labels.joblib", "")
+                artifacts["rare_label_configs"][name] = joblib.load(os.path.join(rare_label_path, file))
+
         return artifacts
 
     def transform(self, raw_df: pd.DataFrame) -> pd.DataFrame:
-        # --- FIX 2 (continued): Apply standardization first ---
         df = _standardize_input_columns(raw_df)
-        # --- END OF FIX 2 ---
-        
         df = clean_data(df, verbose=False)
         df = convert_column_types(df)
-        imputer = MissingValueImputer(); imputer.imputer_values_ = self.artifacts["imputer"]
+        
+        imputer = MissingValueImputer(); imputer.imputer_values_ = self.artifacts.get("imputer", {})
         df = imputer.transform(df)
-        outlier_transformer = OutlierTransformer(); outlier_transformer.clip_bounds_ = self.artifacts["outlier_config"]
+        
+        outlier_transformer = OutlierTransformer(); outlier_transformer.clip_bounds_ = self.artifacts.get("outlier_config", {})
         df = outlier_transformer.transform(df)
+        
         fe_transformer = FeatureEngineeringTransformer(); fe_transformer.fit(df); df = fe_transformer.transform(df)
-        binning_transformer = BinningTransformer(); df = binning_transformer.transform(df)
-        rare_label_encoder = RareLabelEncoder(); df = rare_label_encoder.transform(df)
-        vif_features_to_keep = self.artifacts["vif_selected_features"]
+        
+        # --- FIX APPLIED HERE: Manually set the loaded artifacts ---
+        binning_transformer = BinningTransformer(); 
+        binning_transformer.bin_edges = self.artifacts.get("binning_configs", {})
+        df = binning_transformer.transform(df)
+        
+        rare_label_encoder = RareLabelEncoder(); 
+        rare_label_encoder.rare_labels_ = self.artifacts.get("rare_label_configs", {})
+        df = rare_label_encoder.transform(df)
+        # --- END OF FIX ---
+        
+        vif_features_to_keep = self.artifacts.get("vif_selected_features")
         if vif_features_to_keep:
-            numeric_cols = df.select_dtypes(include=np.number)
+            numeric_cols = df.select_dtypes(include=np.number).columns
             vif_candidates = numeric_cols.loc[:, numeric_cols.nunique() > 2].columns
             cols_to_drop = [col for col in vif_candidates if col not in vif_features_to_keep]
             df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
-        encoder = self.artifacts["encoder"]
+
+        encoder = self.artifacts.get("encoder")
         if encoder:
+            df['converted'] = 0 
             encoded_data = encoder.transform(df)
             feature_names = encoder.get_feature_names_out()
             df = pd.DataFrame(encoded_data, columns=feature_names, index=df.index)
-        initial_scaler_artifact = self.artifacts["initial_scaler"]
+            cols_to_drop = [col for col in df.columns if 'converted' in col]
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+        initial_scaler_artifact = self.artifacts.get("initial_scaler")
         if initial_scaler_artifact:
             scaler_transformer = initial_scaler_artifact['transformer']
             scaler_cols = initial_scaler_artifact['columns']
@@ -164,10 +179,12 @@ class PreprocessingPipeline:
             df_scaled = pd.DataFrame(scaled_data, columns=scaler_cols, index=df.index)
             df_unscaled = df.drop(columns=scaler_cols, errors='ignore')
             df = pd.concat([df_unscaled, df_scaled], axis=1)
-        final_target_encoder = self.artifacts["final_target_encoder"]
+        
+        final_target_encoder = self.artifacts.get("final_target_encoder")
         if final_target_encoder:
             df = final_target_encoder.transform(df)
-        final_scaler = self.artifacts["final_scaler"]
+
+        final_scaler = self.artifacts.get("final_scaler")
         if final_scaler:
             df_final = pd.DataFrame(final_scaler.transform(df), columns=df.columns, index=df.index)
         else:
