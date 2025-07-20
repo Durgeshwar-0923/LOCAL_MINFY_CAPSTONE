@@ -1,0 +1,94 @@
+# --- Python ---
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Byte-compiled / optimized / C extensions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Data Files ---
+# Ignore all raw and processed data. These should be stored elsewhere (e.g., S3, GCS).
+data/raw/
+data/processed/
+
+# --- MLflow & Model Artifacts ---
+# Ignore MLflow tracking logs and all generated model artifacts.
+# These are the results of your pipeline, not the source code.
+mlruns/
+artifacts/
+outputs/
+drift_reports/
+catboost_logs/
+
+# --- Web Application Files ---
+# Ignore user-uploaded files and the resulting predictions.
+uploads/
+predictions/
+
+# --- Jupyter Notebooks ---
+# Ignore notebook checkpoints to avoid clutter.
+.ipynb_checkpoints
+
+# --- IDE / Editor Configuration ---
+# Visual Studio Code
+.vscode/
+# PyCharm
+.idea/
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+# Atom
+.atom/
+# Eclipse
+.project
+.pydevproject
+.settings/
+
+# --- Environment Variables ---
+# Never commit environment files containing secrets or credentials.
+.env
+.env.*
+*.env
+
+# --- OS-specific files ---
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Logs ---
+# Ignore log files
+*.log
+logs/
+
+# --- Other ---
+# Temporary files
+*.tmp
+*.swp
+*~

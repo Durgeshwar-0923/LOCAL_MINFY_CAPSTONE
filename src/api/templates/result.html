@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prediction Results - Lead Conversion</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+        }
+        .header {
+            background: white;
+            padding: 2rem;
+            border-bottom: 1px solid #dee2e6;
+            text-align: center;
+        }
+        .header h1 {
+            font-weight: 700;
+            color: #32325d;
+        }
+        .header p {
+            color: #6c757d;
+            font-size: 1.1rem;
+            margin-bottom: 1.5rem;
+        }
+        .main-content {
+            padding: 2rem;
+        }
+        .table-card {
+            background: white;
+            border: none;
+            border-radius: 1rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+            overflow: hidden;
+        }
+        .card-header-custom {
+            padding: 1rem 1.5rem;
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+            font-weight: 600;
+        }
+        
+        /* --- FIX FOR SCROLLING --- */
+        /* This wrapper div makes the table scroll horizontally on small screens */
+        .table-responsive {
+            max-height: 60vh; /* Optional: limit vertical height as well */
+        }
+        /* --- END OF FIX --- */
+
+        .table thead th {
+            background-color: #4f46e5;
+            color: white;
+            font-weight: 600;
+            white-space: nowrap;
+            position: sticky; /* Make headers stick during scroll */
+            top: 0;
+            z-index: 10;
+        }
+        .table tbody td {
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+        
+        /* --- STYLE FOR HIGHLIGHTING --- */
+        .highlight-col {
+            background-color: #e0e7ff !important;
+            color: #3730a3;
+            font-weight: 500;
+            position: sticky; /* Make prediction columns stick */
+            right: 0;
+            box-shadow: -2px 0 5px rgba(0,0,0,0.05);
+        }
+        .highlight-col-2 {
+            background-color: #e0e7ff !important;
+            color: #3730a3;
+            font-weight: 500;
+            position: sticky;
+            right: 120px; /* Adjust based on the width of the last column */
+        }
+        /* --- END OF HIGHLIGHTING --- */
+
+        .btn-primary, .btn-secondary {
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+        .btn-primary:hover, .btn-secondary:hover {
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><i class="bi bi-card-checklist"></i> Prediction Results</h1>
+        <p>
+            Using model: <strong>{{ model_name }}</strong>. 
+            Showing a preview of the first 100 of <strong>{{ num_records }}</strong> records.
+        </p>
+        <div class="d-flex justify-content-center gap-2">
+            <a href="{{ url_for('download', filename=result_file) }}" class="btn btn-primary">
+                <i class="bi bi-download"></i> Download Full Results (.csv)
+            </a>
+            <a href="{{ url_for('home') }}" class="btn btn-secondary">
+                <i class="bi bi-arrow-left"></i> Make Another Prediction
+            </a>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="card table-card">
+            <div class="card-header-custom">
+                <i class="bi bi-table"></i> Results Preview
+            </div>
+            <!-- This div is the key to fixing the horizontal scroll -->
+            <div class="table-responsive">
+                <table class="table table-hover table-bordered mb-0">
+                    <thead>
+                        <tr>
+                            {% for header in table_headers %}
+                                <th scope="col" 
+                                    {% if header == 'Lead_Converted_Prediction' %} class="highlight-col" 
+                                    {% elif header == 'Lead_Conversion_Probability' %} class="highlight-col-2" 
+                                    {% endif %}>
+                                    {{ header }}
+                                </th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in table_rows %}
+                            <tr>
+                                {% for cell in row %}
+                                    <td {% if loop.index0 == (table_headers|length - 1) %} class="highlight-col" 
+                                        {% elif loop.index0 == (table_headers|length - 2) %} class="highlight-col-2" 
+                                        {% endif %}>
+                                        {{ cell }}
+                                    </td>
+                                {% endfor %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

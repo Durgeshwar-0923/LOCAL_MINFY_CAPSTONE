@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lead Conversion Predictor</title>
+    
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Bootstrap Icons -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+
+        .upload-card {
+            background: white;
+            border: none;
+            border-radius: 1rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+            max-width: 550px;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        .card-header-custom {
+            background: linear-gradient(135deg, #4f46e5, #6366f1);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .card-header-custom h2 {
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+        
+        .card-body {
+            padding: 2.5rem;
+        }
+
+        .status-section {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+
+        .status-badge {
+            font-weight: 600;
+        }
+
+        .status-online {
+            color: #198754;
+        }
+
+        .status-offline {
+            color: #dc3545;
+        }
+
+        .file-drop-area {
+            border: 2px dashed #adb5bd;
+            border-radius: 0.5rem;
+            padding: 2.5rem;
+            text-align: center;
+            cursor: pointer;
+            transition: background-color 0.2s ease, border-color 0.2s ease;
+        }
+        .file-drop-area.dragover {
+            background-color: #e9ecef;
+            border-color: #4f46e5;
+        }
+        .file-drop-area p {
+            margin: 0;
+            color: #6c757d;
+        }
+
+        .btn-primary {
+            background-color: #4f46e5;
+            border-color: #4f46e5;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary:hover {
+            background-color: #4338ca;
+            border-color: #4338ca;
+            transform: translateY(-2px);
+        }
+
+        .card-footer {
+            background-color: #f8f9fa;
+            text-align: center;
+            padding: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="card upload-card">
+        <div class="card-header-custom">
+            <h2><i class="bi bi-robot"></i> Lead Conversion AI</h2>
+            <p class="mb-0 opacity-75">Predict which leads are most likely to convert.</p>
+        </div>
+        
+        <div class="card-body">
+            <!-- System Status -->
+            <div class="status-section">
+                <div class="d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-hdd-stack"></i> Model in use: <strong>{{ model_name }}</strong></span>
+                    {% if model_loaded %}
+                        <span class="status-badge status-online"><i class="bi bi-check-circle-fill"></i> System Online</span>
+                    {% else %}
+                        <span class="status-badge status-offline"><i class="bi bi-x-circle-fill"></i> System Offline</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                            {{ message }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <!-- Upload Form -->
+            <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" id="upload-form">
+                <div class="file-drop-area" id="drop-area">
+                    <input type="file" id="file-input" name="file" accept=".csv" class="d-none" required>
+                    <i class="bi bi-cloud-arrow-up fs-1 text-secondary"></i>
+                    <p class="mt-2"><strong>Drag & drop your CSV file here</strong><br>or click to select a file</p>
+                    <small class="text-muted" id="file-name"></small>
+                </div>
+                
+                <button type="submit" class="btn btn-primary w-100 mt-4" id="submit-button">
+                    <span id="button-text"><i class="bi bi-magic"></i> Predict Conversion</span>
+                    <span id="loading-spinner" class="spinner-border spinner-border-sm" role="status" aria-hidden="true" style="display: none;"></span>
+                </button>
+            </form>
+        </div>
+        
+        <div class="card-footer">
+            <a href="{{ url_for('sample') }}" class="text-decoration-none">
+                <i class="bi bi-file-earmark-spreadsheet"></i> Download Sample CSV
+            </a>
+        </div>
+    </div>
+
+    <!-- Bootstrap 5 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('file-input');
+        const fileNameDisplay = document.getElementById('file-name');
+        const uploadForm = document.getElementById('upload-form');
+        const submitButton = document.getElementById('submit-button');
+
+        dropArea.addEventListener('click', () => fileInput.click());
+        
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                fileNameDisplay.textContent = `Selected file: ${fileInput.files[0].name}`;
+            }
+        });
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.add('dragover'), false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, () => dropArea.classList.remove('dragover'), false);
+        });
+
+        dropArea.addEventListener('drop', (e) => {
+            fileInput.files = e.dataTransfer.files;
+            fileNameDisplay.textContent = `Selected file: ${fileInput.files[0].name}`;
+        }, false);
+
+        uploadForm.addEventListener('submit', () => {
+            submitButton.disabled = true;
+            document.getElementById('button-text').style.display = 'none';
+            document.getElementById('loading-spinner').style.display = 'inline-block';
+        });
+    </script>
+</body>
+</html>
