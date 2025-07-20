@@ -112,20 +112,23 @@ class PreprocessingPipeline:
                 logger.warning(f"⚠️ Could not load artifact: {name} from path: {full_path}. Setting to None.")
                 artifacts[name] = None
         
-        # Directory-based artifacts (for binning and rare labels)
-        artifacts["binning_configs"] = {}
+        # --- FIX 1: Correctly load directory-based artifacts ---
+        artifacts["binning_edges"] = {}
         binning_path = os.path.join(self.artifact_path, "binning")
         if os.path.exists(binning_path):
             for file in os.listdir(binning_path):
                 name = file.replace("_binning_config.joblib", "")
-                artifacts["binning_configs"][name] = joblib.load(os.path.join(binning_path, file))
+                # Load the dictionary and extract only the 'edges' key
+                config = joblib.load(os.path.join(binning_path, file))
+                artifacts["binning_edges"][name] = config['edges']
         
-        artifacts["rare_label_configs"] = {}
+        artifacts["rare_labels"] = {}
         rare_label_path = os.path.join(self.artifact_path, "rare_labels")
         if os.path.exists(rare_label_path):
             for file in os.listdir(rare_label_path):
                 name = file.replace("_rare_labels.joblib", "")
-                artifacts["rare_label_configs"][name] = joblib.load(os.path.join(rare_label_path, file))
+                artifacts["rare_labels"][name] = joblib.load(os.path.join(rare_label_path, file))
+        # --- END OF FIX 1 ---
 
         return artifacts
 
@@ -142,22 +145,22 @@ class PreprocessingPipeline:
         
         fe_transformer = FeatureEngineeringTransformer(); fe_transformer.fit(df); df = fe_transformer.transform(df)
         
-        # --- FIX APPLIED HERE: Manually set the loaded artifacts ---
         binning_transformer = BinningTransformer(); 
-        binning_transformer.bin_edges = self.artifacts.get("binning_configs", {})
+        binning_transformer.bin_edges = self.artifacts.get("binning_edges", {})
         df = binning_transformer.transform(df)
         
         rare_label_encoder = RareLabelEncoder(); 
-        rare_label_encoder.rare_labels_ = self.artifacts.get("rare_label_configs", {})
+        rare_label_encoder.rare_labels_ = self.artifacts.get("rare_labels", {})
         df = rare_label_encoder.transform(df)
-        # --- END OF FIX ---
         
+        # --- FIX 2: Correct VIF filtering logic ---
         vif_features_to_keep = self.artifacts.get("vif_selected_features")
         if vif_features_to_keep:
-            numeric_cols = df.select_dtypes(include=np.number).columns
-            vif_candidates = numeric_cols.loc[:, numeric_cols.nunique() > 2].columns
+            numeric_df = df.select_dtypes(include=np.number)
+            vif_candidates = numeric_df.columns[numeric_df.nunique() > 2]
             cols_to_drop = [col for col in vif_candidates if col not in vif_features_to_keep]
             df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+        # --- END OF FIX 2 ---
 
         encoder = self.artifacts.get("encoder")
         if encoder:
