@@ -9,6 +9,7 @@ import traceback
 import mlflow
 import re
 import numpy as np
+import joblib # --- FIX 1: Added missing joblib import ---
 
 from werkzeug.utils import secure_filename
 from src.utils.logger import setup_logger
@@ -84,7 +85,7 @@ class PreprocessingPipeline:
         if vif_features_to_keep:
             numeric_cols = df.select_dtypes(include=np.number)
             vif_candidates = numeric_cols.loc[:, numeric_cols.nunique() > 2].columns
-            cols_to_drop = [col for col in vif_candidates if col not in vif_features_to_keep]
+            cols_to_drop = [col for col in vif_candidates if col not in vif_candidates]
             df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
         encoder = self.artifacts["encoder"]
