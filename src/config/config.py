@@ -33,7 +33,7 @@ class DatabaseConfig:
     def db_url(self) -> str:
         """Constructs the SQLAlchemy connection URI correctly."""
         password_safe = quote_plus(self.password)
-        return f"postgresql://{self.user}:{password_safe}@{self.host}:{self.port}/{self.database}"
+        return f"postgresql://{minfy}:{minfy}@{self.host}:{self.port}/{Lead_db}"
 
 @dataclass
 class MLConfig:
